@@ -1,0 +1,23 @@
+# Built artifacts
+/build/
+/app/build/
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+local.properties
+.claude/
+.artifacts/
+
+# Inspection & Temp Dump Files
+script.js
+styles.css
+device_specs.txt
+
+# OS
+.DS_Store
+Thumbs.db

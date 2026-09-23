@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">A MSic player</string>
+    <string name="widget_description">Interactive music player with playback controls, dynamic theming, and quick favorites.</string>
+    <string name="widget_no_music">No track playing</string>
+    <string name="widget_ready_to_play">Your library is ready</string>
+    <string name="widget_play_library">Play Library</string>
+</resources>
