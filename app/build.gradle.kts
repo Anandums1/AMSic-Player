@@ -14,16 +14,35 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
+
+        // Filter native C++ libraries for physical device architectures (removes emulator binaries)
+        ndk {
+            abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+        }
+    }
+
+    androidResources {
+        localeFilters += listOf("en")
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = true
         }
     }
 
@@ -72,7 +91,7 @@ dependencies {
     implementation("androidx.media3:media3-session:$media3Version")
     implementation("androidx.media3:media3-common:$media3Version")
 
-    // Room (wired in for later — no entities yet)
+    // Room
     val roomVersion = "2.8.5"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
@@ -87,7 +106,7 @@ dependencies {
     // Koin — dependency injection
     implementation("io.insert-koin:koin-androidx-compose:4.2.2")
 
-    // Palette — dominant color extraction (for later per-song theming)
+    // Palette — dominant color extraction (for per-song theming)
     implementation("androidx.palette:palette:1.1.0-alpha01")
 
     // Core / Lifecycle
