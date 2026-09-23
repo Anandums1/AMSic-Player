@@ -1,6 +1,7 @@
 # Built artifacts
 /build/
 /app/build/
+*.apk
 
 # Gradle
 .gradle/
