@@ -4,9 +4,19 @@ import android.app.PendingIntent
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import androidx.core.net.toUri
 import android.provider.MediaStore
+import org.jaudiotagger.audio.AudioFileIO
+import org.jaudiotagger.tag.FieldKey
+import java.io.File
+
+import android.util.Log
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
+import java.io.IOException
 
 /**
  * Result of a metadata update operation.
@@ -123,10 +133,12 @@ class MediaStoreDataSource(private val context: Context) {
     }
 
     /**
-     * Updates metadata for a specific audio file in MediaStore.
-     * Handles Scoped Storage on API 29+.
+     * Updates metadata for a specific audio file.
+     * Modifies embedded audio tags (ID3v2, Vorbis, etc.) via a sandbox cache copy,
+     * streams changes back via ContentResolver (handling Scoped Storage on API 30+),
+     * updates MediaStore database records, and triggers MediaScanner to re-index the file.
      */
-    fun updateMetadata(
+    suspend fun updateMetadata(
         audioFile: AudioFile,
         newTitle: String,
         newArtist: String,
@@ -135,28 +147,168 @@ class MediaStoreDataSource(private val context: Context) {
         newYear: Int = 0,
         newTrackNumber: String = ""
     ): MetadataUpdateResult {
-        val values = ContentValues().apply {
-            put(MediaStore.Audio.Media.TITLE, newTitle)
-            put(MediaStore.Audio.Media.ARTIST, newArtist)
-            put(MediaStore.Audio.Media.ALBUM, newAlbum)
-            if (newGenre.isNotBlank()) put(MediaStore.Audio.Media.GENRE, newGenre)
-            if (newYear > 0) put(MediaStore.Audio.Media.YEAR, newYear)
-            if (newTrackNumber.isNotBlank()) put(MediaStore.Audio.Media.TRACK, newTrackNumber)
+        val trimmedTitle = newTitle.trim()
+        val trimmedArtist = newArtist.trim()
+        val trimmedAlbum = newAlbum.trim()
+        val trimmedGenre = newGenre.trim()
+        val trimmedTrackNumber = newTrackNumber.trim()
+
+        var fileWriteSuccess = false
+        val originalFile = File(audioFile.filePath)
+        val extension = if (originalFile.extension.isNotBlank()) {
+            originalFile.extension
+        } else {
+            when (audioFile.mimeType) {
+                "audio/mpeg", "audio/mp3" -> "mp3"
+                "audio/flac" -> "flac"
+                "audio/mp4", "audio/m4a", "audio/aac" -> "m4a"
+                "audio/ogg" -> "ogg"
+                "audio/x-wav", "audio/wav" -> "wav"
+                else -> "mp3"
+            }
         }
 
-        return try {
-            val rowsUpdated = context.contentResolver.update(
-                audioFile.contentUri,
-                values,
-                null,
-                null
-            )
-            if (rowsUpdated > 0) MetadataUpdateResult.Success else MetadataUpdateResult.Failure
-        } catch (e: SecurityException) {
-            handleSecurityException(audioFile.contentUri)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            MetadataUpdateResult.Failure
+        val tempFile = File(
+            context.cacheDir,
+            "meta_edit_${audioFile.id}_${System.currentTimeMillis()}.$extension"
+        )
+
+        try {
+            // 1. Copy source audio to app cache for safe in-sandbox tag manipulation
+            var cacheCopySuccess = false
+            try {
+                context.contentResolver.openInputStream(audioFile.contentUri)?.use { input ->
+                    tempFile.outputStream().use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                cacheCopySuccess = tempFile.exists() && tempFile.length() > 0
+            } catch (e: Exception) {
+                Log.e("MediaStoreDataSource", "Failed to copy audio stream to cache", e)
+            }
+
+            // 2. Modify embedded tags using JAudioTagger in private cache
+            var tagEditSuccess = false
+            if (cacheCopySuccess) {
+                try {
+                    val af = AudioFileIO.read(tempFile)
+                    val tag = af.tagOrCreateAndSetDefault
+                    if (trimmedTitle.isNotBlank()) tag.setField(FieldKey.TITLE, trimmedTitle)
+                    if (trimmedArtist.isNotBlank()) tag.setField(FieldKey.ARTIST, trimmedArtist)
+                    if (trimmedAlbum.isNotBlank()) tag.setField(FieldKey.ALBUM, trimmedAlbum)
+                    if (trimmedGenre.isNotBlank()) {
+                        tag.setField(FieldKey.GENRE, trimmedGenre)
+                    } else {
+                        try { tag.deleteField(FieldKey.GENRE) } catch (_: Exception) {}
+                    }
+                    if (newYear > 0) {
+                        tag.setField(FieldKey.YEAR, newYear.toString())
+                    } else {
+                        try { tag.deleteField(FieldKey.YEAR) } catch (_: Exception) {}
+                    }
+                    if (trimmedTrackNumber.isNotBlank()) {
+                        tag.setField(FieldKey.TRACK, trimmedTrackNumber)
+                    } else {
+                        try { tag.deleteField(FieldKey.TRACK) } catch (_: Exception) {}
+                    }
+                    af.commit()
+                    tagEditSuccess = true
+                } catch (t: Throwable) {
+                    Log.w("MediaStoreDataSource", "JAudioTagger could not write embedded tags: ${t.message}")
+                }
+            }
+
+            // 3. Stream modified cache file back to the MediaStore contentUri
+            if (tagEditSuccess) {
+                try {
+                    context.contentResolver.openOutputStream(audioFile.contentUri, "wt")?.use { output ->
+                        tempFile.inputStream().use { input ->
+                            input.copyTo(output)
+                        }
+                    } ?: throw IOException("Could not open output stream for ${audioFile.contentUri}")
+                    fileWriteSuccess = true
+                } catch (e: SecurityException) {
+                    return handleSecurityException(audioFile.contentUri)
+                } catch (e: Exception) {
+                    Log.e("MediaStoreDataSource", "Failed to write updated tags back to content URI", e)
+                }
+            }
+
+            // 4. Update MediaStore database record
+            val values = ContentValues().apply {
+                if (trimmedTitle.isNotBlank()) put(MediaStore.Audio.Media.TITLE, trimmedTitle)
+                if (trimmedArtist.isNotBlank()) put(MediaStore.Audio.Media.ARTIST, trimmedArtist)
+                if (trimmedAlbum.isNotBlank()) put(MediaStore.Audio.Media.ALBUM, trimmedAlbum)
+                if (trimmedGenre.isNotBlank()) {
+                    put(MediaStore.Audio.Media.GENRE, trimmedGenre)
+                } else {
+                    putNull(MediaStore.Audio.Media.GENRE)
+                }
+                if (newYear > 0) {
+                    put(MediaStore.Audio.Media.YEAR, newYear)
+                } else {
+                    putNull(MediaStore.Audio.Media.YEAR)
+                }
+                val trackNumInt = trimmedTrackNumber.takeWhile { it.isDigit() }.toIntOrNull()
+                if (trackNumInt != null && trackNumInt > 0) {
+                    put(MediaStore.Audio.Media.TRACK, trackNumInt)
+                } else {
+                    putNull(MediaStore.Audio.Media.TRACK)
+                }
+            }
+
+            val rowsUpdated = try {
+                context.contentResolver.update(
+                    audioFile.contentUri,
+                    values,
+                    null,
+                    null
+                )
+            } catch (e: SecurityException) {
+                return handleSecurityException(audioFile.contentUri)
+            } catch (e: Exception) {
+                Log.e("MediaStoreDataSource", "Failed to update MediaStore row", e)
+                0
+            }
+
+            // 5. Notify MediaScanner to re-index the file ONLY IF physical file was written
+            // (If physical write failed, running scanner would revert the database update!)
+            if (fileWriteSuccess) {
+                val pathToScan = if (originalFile.exists()) {
+                    originalFile.absolutePath
+                } else {
+                    audioFile.filePath
+                }
+                if (pathToScan.isNotBlank()) {
+                    scanFileAndWait(pathToScan)
+                }
+            }
+
+            return if (rowsUpdated > 0 || fileWriteSuccess) {
+                MetadataUpdateResult.Success
+            } else {
+                MetadataUpdateResult.Failure
+            }
+        } finally {
+            if (tempFile.exists()) {
+                tempFile.delete()
+            }
+        }
+    }
+
+    private suspend fun scanFileAndWait(path: String): Uri? {
+        return withTimeoutOrNull(3000L) {
+            suspendCancellableCoroutine { continuation ->
+                MediaScannerConnection.scanFile(
+                    context,
+                    arrayOf(path),
+                    null
+                ) { _, uri ->
+                    if (continuation.isActive) {
+                        continuation.resume(uri)
+                    }
+                }
+            }
         }
     }
 

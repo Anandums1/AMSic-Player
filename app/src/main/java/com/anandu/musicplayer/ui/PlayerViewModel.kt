@@ -51,6 +51,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.collectLatest
 import androidx.core.net.toUri
+import android.widget.Toast
 
 enum class LibraryLayout { List, Tiles }
 enum class SortOrder { Title, Artist, Album, Duration, DateAdded, Year }
@@ -532,8 +533,16 @@ class PlayerViewModel(
             originalTracks = files
             val sortedFiles = sortTrackList(files, _libraryState.value.sortOrder, _libraryState.value.sortDirection)
             
-            // Group data
-            val artists = files.groupBy { it.artist }
+            // Group data with multi-artist comma splitting
+            val artistsMap = mutableMapOf<String, MutableList<AudioFile>>()
+            files.forEach { file ->
+                val splitArtists = file.artist.split(",").map { it.trim() }.filter { it.isNotBlank() }
+                val artistList = if (splitArtists.isEmpty()) listOf("Unknown Artist") else splitArtists
+                artistList.forEach { artistName ->
+                    artistsMap.getOrPut(artistName) { mutableListOf() }.add(file)
+                }
+            }
+            val artists = artistsMap.toSortedMap(String.CASE_INSENSITIVE_ORDER)
             val albums = files.groupBy { it.album }
             val genres = files.groupBy { it.genre.ifBlank { "Unknown Genre" } }
 
@@ -588,9 +597,17 @@ class PlayerViewModel(
                         }
                     }
                 } else {
-                    val currentIndex = controller.currentMediaItemIndex
+                    val currentMediaId = controller.currentMediaItem?.mediaId
+                    val newIndex = if (currentMediaId != null) {
+                        currentTracks.indexOfFirst { it.contentUri.toString() == currentMediaId }
+                    } else -1
+                    val targetIndex = if (newIndex != -1) {
+                        newIndex
+                    } else {
+                        controller.currentMediaItemIndex.coerceIn(0, currentTracks.lastIndex)
+                    }
                     val currentPosition = controller.currentPosition
-                    controller.setMediaItems(mediaItems, currentIndex, currentPosition)
+                    controller.setMediaItems(mediaItems, targetIndex, currentPosition)
                 }
             }
             _playbackState.update { it.copy(isLoading = false) }
@@ -1051,7 +1068,11 @@ class PlayerViewModel(
     }
 
     fun navigateToArtist(artistName: String) {
-        val artistTracks = originalTracks.filter { it.artist.equals(artistName, ignoreCase = true) }
+        val targetArtists = artistName.split(",").map { it.trim().lowercase() }.filter { it.isNotBlank() }
+        val artistTracks = originalTracks.filter { track ->
+            val trackArtists = track.artist.split(",").map { it.trim().lowercase() }
+            targetArtists.any { target -> trackArtists.contains(target) }
+        }
         if (artistTracks.isNotEmpty()) {
             _libraryState.update { state ->
                 val sorted = sortTrackList(artistTracks, state.sortOrder, state.sortDirection)
@@ -1200,9 +1221,18 @@ class PlayerViewModel(
 
     fun moveTrack(fromIndex: Int, toIndex: Int) {
         mediaController?.let { ctrl ->
-            if (fromIndex in 0 until ctrl.mediaItemCount && toIndex in 0 until ctrl.mediaItemCount) {
+            if (fromIndex in 0 until ctrl.mediaItemCount && toIndex in 0 until ctrl.mediaItemCount && fromIndex != toIndex) {
+                _playbackState.update { state ->
+                    val queue = state.queue.toMutableList()
+                    if (fromIndex in queue.indices && toIndex in queue.indices) {
+                        val item = queue.removeAt(fromIndex)
+                        queue.add(toIndex, item)
+                        state.copy(queue = queue)
+                    } else {
+                        state
+                    }
+                }
                 ctrl.moveMediaItem(fromIndex, toIndex)
-                syncState(ctrl)
             }
         }
     }
@@ -1210,8 +1240,16 @@ class PlayerViewModel(
     fun removeTrack(index: Int) {
         mediaController?.let { ctrl ->
             if (index in 0 until ctrl.mediaItemCount) {
+                _playbackState.update { state ->
+                    val queue = state.queue.toMutableList()
+                    if (index in queue.indices) {
+                        queue.removeAt(index)
+                        state.copy(queue = queue)
+                    } else {
+                        state
+                    }
+                }
                 ctrl.removeMediaItem(index)
-                syncState(ctrl)
             }
         }
     }
@@ -1266,8 +1304,16 @@ class PlayerViewModel(
             val result = mediaStoreDataSource.updateMetadata(track, title, artist, album, genre, year, trackNumber)
             when (result) {
                 is MetadataUpdateResult.Success -> {
-                    // Refresh library to reflect changes
                     withContext(Dispatchers.Main) {
+                        _playbackState.update { state ->
+                            if (state.mediaId == track.contentUri.toString()) {
+                                state.copy(
+                                    title = title.ifBlank { state.title },
+                                    artist = artist.ifBlank { state.artist }
+                                )
+                            } else state
+                        }
+                        Toast.makeText(getApplication(), "Metadata updated successfully", Toast.LENGTH_SHORT).show()
                         loadTracks()
                     }
                 }
@@ -1278,7 +1324,9 @@ class PlayerViewModel(
                     }
                 }
                 is MetadataUpdateResult.Failure -> {
-                    // Handle failure if needed
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(getApplication(), "Failed to update metadata", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }

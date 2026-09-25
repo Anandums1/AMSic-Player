@@ -14,6 +14,7 @@ android {
         targetSdk = 37
         versionCode = 1
         versionName = "0.1.0"
+        versionNameSuffix = "alpha"
     }
 
     buildTypes {
@@ -99,4 +100,7 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:3.0.0")
     implementation("com.squareup.retrofit2:converter-gson:3.0.0")
     implementation("com.squareup.okhttp3:logging-interceptor:5.5.0")
+
+    // Audio Tag Editor
+    implementation("net.jthink:jaudiotagger:3.0.1")
 }

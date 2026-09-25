@@ -18,7 +18,8 @@ local.properties
 script.js
 styles.css
 device_specs.txt
-
+App Icon Minimal.png
+*.apk
 # OS
 .DS_Store
 Thumbs.db

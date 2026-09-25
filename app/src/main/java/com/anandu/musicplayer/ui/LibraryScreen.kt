@@ -32,9 +32,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -593,6 +596,16 @@ private fun LibraryTopBar(
     var showSortMenu by remember { mutableStateOf(false) }
     var isSearchActive by remember { mutableStateOf(false) }
     var localSearchQuery by remember(searchQuery) { mutableStateOf(searchQuery) }
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(isSearchActive) {
+        if (isSearchActive) {
+            delay(100.milliseconds)
+            focusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
 
     LaunchedEffect(localSearchQuery) {
         if (localSearchQuery != searchQuery) {
@@ -626,7 +639,9 @@ private fun LibraryTopBar(
                                 focusedIndicatorColor = Color.Transparent,
                                 unfocusedIndicatorColor = Color.Transparent,
                             ),
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .focusRequester(focusRequester)
                         )
                     } else {
                         Text(
@@ -1863,93 +1878,6 @@ private fun CategoryTile(
 
 // ── Dialogs ────────────────────────────────────────────────────────────
 
-@Composable
-internal fun MetadataEditorDialog(
-    track: AudioFile,
-    onDismiss: () -> Unit,
-    onSave: (title: String, artist: String, album: String, genre: String, year: Int, trackNumber: String) -> Unit
-) {
-    var title by remember { mutableStateOf(track.title) }
-    var artist by remember { mutableStateOf(track.artist) }
-    var album by remember { mutableStateOf(track.album) }
-    var genre by remember { mutableStateOf(track.genre) }
-    var yearStr by remember { mutableStateOf(if (track.year > 0) track.year.toString() else "") }
-    var trackNum by remember { mutableStateOf(track.trackNumber) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Edit Metadata") },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                TextField(
-                    value = title,
-                    onValueChange = { title = it },
-                    label = { Text("Title") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                TextField(
-                    value = artist,
-                    onValueChange = { artist = it },
-                    label = { Text("Artist") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                TextField(
-                    value = album,
-                    onValueChange = { album = it },
-                    label = { Text("Album") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                TextField(
-                    value = genre,
-                    onValueChange = { genre = it },
-                    label = { Text("Genre") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextField(
-                        value = yearStr,
-                        onValueChange = { yearStr = it },
-                        label = { Text("Year") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                    TextField(
-                        value = trackNum,
-                        onValueChange = { trackNum = it },
-                        label = { Text("Track No.") },
-                        singleLine = true,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = {
-                    val yearInt = yearStr.toIntOrNull() ?: 0
-                    onSave(title, artist, album, genre, yearInt, trackNum)
-                },
-                enabled = title.isNotBlank() && artist.isNotBlank() && album.isNotBlank()
-            ) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
-            }
-        }
-    )
-}
 
 @Composable
 internal fun AddToPlaylistMenu(
@@ -2062,6 +1990,12 @@ private fun AddSongsToPlaylistDialog(
 ) {
     var searchQuery by remember { mutableStateOf("") }
     var selectedSongs by remember { mutableStateOf(setOf<AudioFile>()) }
+    val dialogFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) {
+        delay(100.milliseconds)
+        dialogFocusRequester.requestFocus()
+    }
 
     val filteredSongs = remember(availableSongs, searchQuery) {
         if (searchQuery.isBlank()) availableSongs
@@ -2116,6 +2050,7 @@ private fun AddSongsToPlaylistDialog(
                         modifier = Modifier
                             .weight(1f)
                             .padding(end = 8.dp)
+                            .focusRequester(dialogFocusRequester)
                     )
 
                     FilterChip(
