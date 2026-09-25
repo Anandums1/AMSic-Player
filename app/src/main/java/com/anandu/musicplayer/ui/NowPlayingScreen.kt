@@ -65,6 +65,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -218,10 +219,21 @@ fun NowPlayingScreenContent(
 
     val isExpanded by remember { derivedStateOf { scaffoldState.bottomSheetState.targetValue == SheetValue.Expanded } }
 
+    val sheetArrowRotation by animateFloatAsState(
+        targetValue = if (isExpanded) 180f else 0f,
+        animationSpec = tween(durationMillis = 280, easing = FastOutSlowInEasing),
+        label = "sheetArrowRotation"
+    )
+
     LaunchedEffect(scaffoldState.bottomSheetState) {
+        var isInitial = true
         snapshotFlow { scaffoldState.bottomSheetState.currentValue }
             .collect {
-                triggerHaptic()
+                if (isInitial) {
+                    isInitial = false
+                } else {
+                    triggerHaptic()
+                }
             }
     }
 
@@ -319,7 +331,7 @@ fun NowPlayingScreenContent(
                         contentDescription = null,
                         modifier = Modifier
                             .size(16.dp)
-                            .graphicsLayer(rotationZ = if (isExpanded) 180f else 0f),
+                            .graphicsLayer(rotationZ = sheetArrowRotation),
                         tint = MaterialTheme.colorScheme.primary
                     )
                     Spacer(Modifier.width(6.dp))
@@ -964,12 +976,13 @@ fun NowPlayingScreenContent(
     if (showEditMetadataDialog) {
         val currentTrack = currentAudioFile ?: tracks.find { it.contentUri.toString() == state.mediaId }
         if (currentTrack != null) {
-            EditTrackMetadataDialog(
+            MetadataEditorDialog(
                 track = currentTrack,
                 onDismiss = { showEditMetadataDialog = false },
                 onSave = { newTitle, newArtist, newAlbum, newGenre, newYear, newTrackNum ->
                     triggerHaptic()
                     onEditMetadata(currentTrack, newTitle, newArtist, newAlbum, newGenre, newYear, newTrackNum)
+                    showEditMetadataDialog = false
                 }
             )
         }
@@ -1607,53 +1620,6 @@ private fun AddToPlaylistSheet(
 // ─────────────────────────────────────────────────────────────────────────
 // Edit Track Metadata Dialog
 // ─────────────────────────────────────────────────────────────────────────
-@Composable
-private fun EditTrackMetadataDialog(
-    track: AudioFile,
-    onDismiss: () -> Unit,
-    onSave: (String, String, String, String, Int, String) -> Unit
-) {
-    var title by remember { mutableStateOf(track.title) }
-    var artist by remember { mutableStateOf(track.artist) }
-    var album by remember { mutableStateOf(track.album) }
-    var genre by remember { mutableStateOf(track.genre) }
-    var yearText by remember { mutableStateOf(if (track.year > 0) track.year.toString() else "") }
-    var trackNum by remember { mutableStateOf(track.trackNumber) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Edit Metadata", fontWeight = FontWeight.Bold) },
-        text = {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedTextField(value = title, onValueChange = { title = it }, label = { Text("Title") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = artist, onValueChange = { artist = it }, label = { Text("Artist") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = album, onValueChange = { album = it }, label = { Text("Album") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = genre, onValueChange = { genre = it }, label = { Text("Genre") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = yearText, onValueChange = { if (it.all { c -> c.isDigit() }) yearText = it }, label = { Text("Year") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = trackNum, onValueChange = { trackNum = it }, label = { Text("Track Number") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = {
-                    val y = yearText.toIntOrNull() ?: 0
-                    onSave(title.trim(), artist.trim(), album.trim(), genre.trim(), y, trackNum.trim())
-                    onDismiss()
-                }
-            ) {
-                Text("Save")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
-        }
-    )
-}
 
 // ─────────────────────────────────────────────────────────────────────────
 // Vinyl Record Turntable Animation Component
@@ -1756,10 +1722,127 @@ private fun QueueList(
     onMove: (Int, Int) -> Unit
 ) {
     val listState = rememberLazyListState()
-    var draggedItemIndex by remember { mutableIntStateOf(-1) }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+
+    var draggedItemIndex by remember { mutableIntStateOf(-1) }
+    var settlingItemIndex by remember { mutableIntStateOf(-1) }
+    var isSettling by remember { mutableStateOf(false) }
+    var dragOffset by remember { mutableFloatStateOf(0f) }
+
     var autoscrollJob by remember { mutableStateOf<Job?>(null) }
+    var scrollSpeed by remember { mutableFloatStateOf(0f) }
+
+    val checkAndPerformSwap: (Float) -> Unit = { stride ->
+        if (stride > 0f && draggedItemIndex >= 0) {
+            while (dragOffset > stride * 0.5f && draggedItemIndex < tracks.size - 1) {
+                val nextIndex = draggedItemIndex + 1
+                onMove(draggedItemIndex, nextIndex)
+                draggedItemIndex = nextIndex
+                dragOffset -= stride
+            }
+            while (dragOffset < -stride * 0.5f && draggedItemIndex > 0) {
+                val prevIndex = draggedItemIndex - 1
+                onMove(draggedItemIndex, prevIndex)
+                draggedItemIndex = prevIndex
+                dragOffset += stride
+            }
+        }
+    }
+
+    val checkAutoscroll: () -> Unit = {
+        val layoutInfo = listState.layoutInfo
+        val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
+        val currentItemInfo = layoutInfo.visibleItemsInfo.find { it.index == draggedItemIndex }
+
+        if (currentItemInfo != null && viewportHeight > 0) {
+            val itemTop = currentItemInfo.offset + dragOffset
+            val itemBottom = itemTop + currentItemInfo.size
+            val edgeThreshold = with(density) { 52.dp.toPx() }
+
+            scrollSpeed = when {
+                itemTop < edgeThreshold && (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0) -> {
+                    -((edgeThreshold - itemTop) / edgeThreshold * 22f).coerceIn(4f, 24f)
+                }
+                itemBottom > viewportHeight - edgeThreshold && listState.canScrollForward -> {
+                    ((itemBottom - (viewportHeight - edgeThreshold)) / edgeThreshold * 22f).coerceIn(4f, 24f)
+                }
+                else -> 0f
+            }
+
+            if (scrollSpeed != 0f) {
+                if (autoscrollJob == null) {
+                    autoscrollJob = scope.launch {
+                        while (isActive && draggedItemIndex >= 0) {
+                            if (scrollSpeed == 0f) break
+                            val scrolled = listState.scrollBy(scrollSpeed)
+                            if (scrolled == 0f) break
+                            dragOffset += scrolled
+
+                            val info = listState.layoutInfo
+                            val curr = info.visibleItemsInfo.find { it.index == draggedItemIndex }
+                            val stride = (curr?.size?.toFloat() ?: with(density) { 72.dp.toPx() }) + info.mainAxisItemSpacing.toFloat()
+                            checkAndPerformSwap(stride)
+
+                            val vHeight = info.viewportEndOffset - info.viewportStartOffset
+                            val cInfo = info.visibleItemsInfo.find { it.index == draggedItemIndex }
+                            if (cInfo != null && vHeight > 0) {
+                                val top = cInfo.offset + dragOffset
+                                val bottom = top + cInfo.size
+                                scrollSpeed = when {
+                                    top < edgeThreshold && (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0) -> {
+                                        -((edgeThreshold - top) / edgeThreshold * 22f).coerceIn(4f, 24f)
+                                    }
+                                    bottom > vHeight - edgeThreshold && listState.canScrollForward -> {
+                                        ((bottom - (vHeight - edgeThreshold)) / edgeThreshold * 22f).coerceIn(4f, 24f)
+                                    }
+                                    else -> 0f
+                                }
+                            }
+                            delay(16)
+                        }
+                        autoscrollJob = null
+                    }
+                }
+            } else {
+                autoscrollJob?.cancel()
+                autoscrollJob = null
+            }
+        }
+    }
+
+    val handleDragFinish: () -> Unit = {
+        autoscrollJob?.cancel()
+        autoscrollJob = null
+        scrollSpeed = 0f
+        val activeIndex = draggedItemIndex
+        if (activeIndex >= 0 && dragOffset != 0f) {
+            settlingItemIndex = activeIndex
+            isSettling = true
+            draggedItemIndex = -1
+            scope.launch {
+                animate(
+                    initialValue = dragOffset,
+                    targetValue = 0f,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessMediumLow
+                    )
+                ) { value, _ ->
+                    dragOffset = value
+                }
+                isSettling = false
+                settlingItemIndex = -1
+                dragOffset = 0f
+            }
+        } else {
+            draggedItemIndex = -1
+            settlingItemIndex = -1
+            isSettling = false
+            dragOffset = 0f
+        }
+    }
 
     LazyColumn(
         state = listState,
@@ -1770,27 +1853,44 @@ private fun QueueList(
         itemsIndexed(tracks, key = { _, track -> track.id }) { index, track ->
             val isPlaying = track.contentUri.toString() == currentMediaId
             val isDragged = index == draggedItemIndex
+            val isSettlingItem = isSettling && index == settlingItemIndex
+            val isActiveItem = isDragged || isSettlingItem
             val currentIndex by rememberUpdatedState(index)
+
+            val itemScale by animateFloatAsState(
+                targetValue = if (isActiveItem) 1.025f else 1f,
+                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                label = "queueItemScale"
+            )
+            val itemElevation by animateDpAsState(
+                targetValue = if (isActiveItem) 8.dp else 0.dp,
+                animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+                label = "queueItemElevation"
+            )
 
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .animateItem()
+                    .zIndex(if (isActiveItem) 2f else 0f)
+                    .animateItem(
+                        placementSpec = if (isActiveItem) null else spring(
+                            stiffness = Spring.StiffnessMediumLow,
+                            dampingRatio = Spring.DampingRatioMediumBouncy
+                        )
+                    )
                     .graphicsLayer {
-                        if (isDragged) {
-                            translationY = dragOffset
-                            shadowElevation = 8.dp.toPx()
-                            scaleX = 1.02f
-                            scaleY = 1.02f
-                        }
+                        translationY = if (isActiveItem) dragOffset else 0f
+                        shadowElevation = itemElevation.toPx()
+                        scaleX = itemScale
+                        scaleY = itemScale
                     }
                     .clip(RoundedCornerShape(12.dp))
                     .background(
-                        if (isDragged) MaterialTheme.colorScheme.surfaceVariant
+                        if (isActiveItem) MaterialTheme.colorScheme.surfaceVariant
                         else if (isPlaying) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
                         else Color.Transparent
                     )
-                    .clickable { onTrackClick(currentIndex) }
+                    .clickable(enabled = draggedItemIndex == -1 && !isSettling) { onTrackClick(currentIndex) }
                     .padding(12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1799,70 +1899,34 @@ private fun QueueList(
                     contentDescription = "Reorder",
                     modifier = Modifier
                         .size(24.dp)
-                        .pointerInput(Unit) {
+                        .pointerInput(track.id) {
                             detectDragGesturesAfterLongPress(
                                 onDragStart = {
+                                    autoscrollJob?.cancel()
+                                    autoscrollJob = null
+                                    scrollSpeed = 0f
+                                    isSettling = false
+                                    settlingItemIndex = -1
                                     draggedItemIndex = currentIndex
                                     dragOffset = 0f
+                                    haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 },
                                 onDrag = { change, dragAmount ->
                                     change.consume()
                                     dragOffset += dragAmount.y
 
                                     val layoutInfo = listState.layoutInfo
-                                    val viewportHeight = layoutInfo.viewportEndOffset - layoutInfo.viewportStartOffset
-                                    val absoluteDragY = change.position.y + (layoutInfo.visibleItemsInfo.find { it.index == currentIndex }?.offset ?: 0) + dragOffset
+                                    val currentInfo = layoutInfo.visibleItemsInfo.find { it.index == draggedItemIndex }
+                                    val stride = (currentInfo?.size?.toFloat() ?: with(density) { 72.dp.toPx() }) + layoutInfo.mainAxisItemSpacing.toFloat()
 
-                                    if (absoluteDragY < 50f && listState.firstVisibleItemIndex > 0) {
-                                        if (autoscrollJob == null) {
-                                            autoscrollJob = scope.launch {
-                                                while (isActive) {
-                                                    listState.scrollBy(-16f)
-                                                    delay(16)
-                                                }
-                                            }
-                                        }
-                                    } else if (absoluteDragY > viewportHeight - 50f) {
-                                        if (autoscrollJob == null) {
-                                            autoscrollJob = scope.launch {
-                                                while (isActive) {
-                                                    listState.scrollBy(16f)
-                                                    delay(16)
-                                                }
-                                            }
-                                        }
-                                    } else {
-                                        autoscrollJob?.cancel()
-                                        autoscrollJob = null
-                                    }
-
-                                    val itemHeight = 64.dp.toPx()
-                                    val swapThreshold = itemHeight * 0.7f
-                                    if (dragOffset > swapThreshold && draggedItemIndex < tracks.size - 1) {
-                                        onMove(draggedItemIndex, draggedItemIndex + 1)
-                                        draggedItemIndex += 1
-                                        dragOffset -= itemHeight
-                                    } else if (dragOffset < -swapThreshold && draggedItemIndex > 0) {
-                                        onMove(draggedItemIndex, draggedItemIndex - 1)
-                                        draggedItemIndex -= 1
-                                        dragOffset += itemHeight
-                                    }
+                                    checkAndPerformSwap(stride)
+                                    checkAutoscroll()
                                 },
-                                onDragEnd = {
-                                    draggedItemIndex = -1
-                                    dragOffset = 0f
-                                    autoscrollJob?.cancel()
-                                    autoscrollJob = null
-                                },
-                                onDragCancel = {
-                                    draggedItemIndex = -1
-                                    dragOffset = 0f
-                                    autoscrollJob?.cancel()
-                                    autoscrollJob = null
-                                }
+                                onDragEnd = { handleDragFinish() },
+                                onDragCancel = { handleDragFinish() }
                             )
                         },
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (isActiveItem) 0.9f else 0.5f)
                 )
                 Spacer(Modifier.width(12.dp))
                 Box(
@@ -1922,7 +1986,10 @@ private fun QueueList(
                         overflow = TextOverflow.Ellipsis
                     )
                 }
-                IconButton(onClick = { onRemove(currentIndex) }) {
+                IconButton(
+                    onClick = { onRemove(currentIndex) },
+                    enabled = draggedItemIndex == -1 && !isSettling
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Delete,
                         contentDescription = "Remove",

@@ -20,12 +20,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.anandu.musicplayer.data.AudioFile
+import kotlinx.coroutines.delay
+import kotlin.time.Duration.Companion.milliseconds
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -40,6 +45,17 @@ fun FavoritesScreen(
 
     var searchQuery by remember { mutableStateOf("") }
     var isSearchActive by remember { mutableStateOf(false) }
+    val searchFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+
+    LaunchedEffect(isSearchActive) {
+        if (isSearchActive) {
+            delay(100.milliseconds)
+            searchFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
+
     var showTrackInfo by remember { mutableStateOf<AudioFile?>(null) }
     var showMetadataEditor by remember { mutableStateOf<AudioFile?>(null) }
     var selectedTrackOptionsMenu by remember { mutableStateOf<AudioFile?>(null) }
@@ -103,7 +119,9 @@ fun FavoritesScreen(
                             focusedIndicatorColor = Color.Transparent,
                             unfocusedIndicatorColor = Color.Transparent
                         ),
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(searchFocusRequester)
                     )
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {

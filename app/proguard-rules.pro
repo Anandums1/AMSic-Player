@@ -33,3 +33,7 @@
 
 # ── Kotlin ───────────────────────────────────────────────────────────────
 -keepclassmembers class kotlin.Metadata { *; }
+
+# ── Jaudiotagger ─────────────────────────────────────────────────────────
+-keep class org.jaudiotagger.** { *; }
+
