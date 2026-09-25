@@ -35,5 +35,9 @@
 -keepclassmembers class kotlin.Metadata { *; }
 
 # ── Jaudiotagger ─────────────────────────────────────────────────────────
+-dontwarn java.awt.**
+-dontwarn javax.imageio.**
+-dontwarn javax.swing.**
+-dontwarn org.jaudiotagger.**
 -keep class org.jaudiotagger.** { *; }
 
